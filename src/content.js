@@ -45,22 +45,73 @@ Function used to avoid multiple injection (cleaner than using an if?)
     var showTranslated = true;
     var orientation = 'horizontal-tb';
 
+    // Set to track processed images to avoid reprocessing
+    const processedImages = new WeakSet();
+
+    // Helper function to check if a node is an image
+    function isImageNode(node) {
+        return node.nodeType === Node.ELEMENT_NODE && 
+               (node.tagName === 'IMG' || node.tagName === 'CANVAS');
+    }
+
+    // Helper function to process all images in a subtree
+    function processImagesInSubtree(root) {
+        if (isImageNode(root) && !processedImages.has(root)) {
+            debug('new image found in subtree', root);
+            processImage(root);
+            return;
+        }
+        
+        // Process all img and canvas elements in the subtree
+        const images = root.querySelectorAll ? root.querySelectorAll('img, canvas') : [];
+        images.forEach((img) => {
+            if (!processedImages.has(img)) {
+                debug('new image found via querySelectorAll', img);
+                processImage(img);
+            }
+        });
+    }
+
     var observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             if (mutation.type === 'childList') {
                 mutation.addedNodes.forEach((node) => {
-                    if (node.tagName === 'IMG' || node.tagName === 'CANVAS') {
-                        debug('image added', node);
-                        processImage(node);
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        // Check if the node itself is an image
+                        if (isImageNode(node)) {
+                            debug('direct image added', node);
+                            processImage(node);
+                        } else {
+                            // Check for images within the added node
+                            processImagesInSubtree(node);
+                        }
                     }
                 });
+                
                 mutation.removedNodes.forEach((node) => {
-                    if (node.tagName === 'IMG' || node.tagName === 'CANVAS') {
-                        debug('image removed', node);
-                        destroyTextboxes(node);
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (isImageNode(node)) {
+                            debug('direct image removed', node);
+                            destroyTextboxes(node);
+                        } else {
+                            // Handle images within removed nodes
+                            const images = node.querySelectorAll ? node.querySelectorAll('img, canvas') : [];
+                            images.forEach((img) => {
+                                debug('image removed via subtree', img);
+                                destroyTextboxes(img);
+                            });
+                        }
                     }
-                }
-                )
+                });
+            }
+            // Also watch for attribute changes that might affect image loading
+            else if (mutation.type === 'attributes' && 
+                     isImageNode(mutation.target) && 
+                     (mutation.attributeName === 'src' || mutation.attributeName === 'data-src')) {
+                debug('image src/data-src changed', mutation.target);
+                // Remove from processed set so it can be reprocessed
+                processedImages.delete(mutation.target);
+                processImage(mutation.target);
             }
         });
     });
@@ -109,7 +160,6 @@ Function used to avoid multiple injection (cleaner than using an if?)
         })
     }
 
-
     /*
     Apply the OCR result to the image in case of an error
      - Wrap the image in a div
@@ -148,7 +198,33 @@ Function used to avoid multiple injection (cleaner than using an if?)
     */
     async function processImage(img) {
         debug('PROCESSING', img);
-        // This is the entire image size (should be atleas 10k pixels)
+        
+        // Skip if already processed
+        if (processedImages.has(img)) {
+            debug('image already processed, skipping', img);
+            return;
+        }
+        
+        // Mark as processed early to avoid duplicate processing
+        processedImages.add(img);
+        
+        // Wait for image to load if not already loaded
+        if (img.tagName === 'IMG' && !img.complete) {
+            debug('waiting for image to load', img);
+            await new Promise((resolve) => {
+                const onLoad = () => {
+                    img.removeEventListener('load', onLoad);
+                    img.removeEventListener('error', onLoad);
+                    resolve();
+                };
+                img.addEventListener('load', onLoad);
+                img.addEventListener('error', onLoad);
+                // Fallback timeout
+                setTimeout(resolve, 5000);
+            });
+        }
+        
+        // This is the entire image size (should be at least 10k pixels)
         if ( img.width*img.height < 100*100 ) {
             info('image too small', img.width, img.height);
             return;
@@ -194,12 +270,13 @@ Function used to avoid multiple injection (cleaner than using an if?)
 
     /*
     Used to handle 'load' event on images that are already loaded.
-    EG: some sites can replace an image with a new one using JS, by modifing the src attribute.
+    EG: some sites can replace an image with a new one using JS, by modifying the src attribute.
     */
     function onImageReload(e) {
         const img = e.target;
+        // Remove from processed set so it can be reprocessed
+        processedImages.delete(img);
         destroyTextboxes(img);
-
         processImage(img);
     }
 
@@ -211,6 +288,9 @@ Function used to avoid multiple injection (cleaner than using an if?)
         const tag = node.tagName;
         if (['IMG', 'CANVAS'].includes(tag)) {
             debug('destroyTextboxes', node);
+            // Remove from processed set
+            processedImages.delete(node);
+            
             const topop = [];
             images.forEach((ptr, idx) => {
                 if (ptr.img === node) {
@@ -222,9 +302,8 @@ Function used to avoid multiple injection (cleaner than using an if?)
             })
 
             topop.sort((a, b) => b - a);
-            topop.forEach((ptr) => {
-                const i = images.indexOf(ptr);
-                images.splice(i, 1);
+            topop.forEach((idx) => {
+                images.splice(idx, 1);
             })
         }
     }
@@ -240,13 +319,38 @@ Function used to avoid multiple injection (cleaner than using an if?)
         }
         OCR = true;
         info('enabling OCR');
+        
+        // Process existing images
         document.querySelectorAll('img').forEach((img) => {
             processImage(img);
         })
         document.querySelectorAll('canvas').forEach((canvas) => {
             processImage(canvas);
         })
-        observer.observe(document.body, {childList: true, subtree: true});
+        
+        // Start observing with more comprehensive options
+        observer.observe(document.body, {
+            childList: true, 
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'data-src', 'class']
+        });
+        
+        // Also set up a periodic check for dynamically loaded images
+        // This is a fallback for cases where MutationObserver might miss something
+        const periodicCheck = setInterval(() => {
+            if (!OCR) {
+                clearInterval(periodicCheck);
+                return;
+            }
+            
+            document.querySelectorAll('img, canvas').forEach((img) => {
+                if (!processedImages.has(img)) {
+                    debug('found unprocessed image during periodic check', img);
+                    processImage(img);
+                }
+            });
+        }, 2000);
     }
 
     /*
@@ -272,6 +376,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
                 textbox.remove();
             })
             ptr.img.removeEventListener('load', onImageReload);
+            processedImages.delete(ptr.img);
             unwrapImage(ptr.img);
             images.splice(i, 1);
         }
