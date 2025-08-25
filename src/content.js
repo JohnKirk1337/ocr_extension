@@ -45,8 +45,10 @@ Function used to avoid multiple injection (cleaner than using an if?)
     var showTranslated = true;
     var orientation = 'horizontal-tb';
 
-    // Set to track processed images to avoid reprocessing
+    // Set to track successfully processed images to avoid reprocessing
     const processedImages = new WeakSet();
+    // Set to track images currently being processed to avoid concurrent processing
+    const processingImages = new WeakSet();
 
     // Helper function to check if a node is an image
     function isImageNode(node) {
@@ -199,73 +201,103 @@ Function used to avoid multiple injection (cleaner than using an if?)
     async function processImage(img) {
         debug('PROCESSING', img);
         
-        // Skip if already processed
+        // Skip if already processed successfully
         if (processedImages.has(img)) {
-            debug('image already processed, skipping', img);
+            debug('image already processed successfully, skipping', img);
             return;
         }
         
-        // Mark as processed early to avoid duplicate processing
-        processedImages.add(img);
-        
-        // Wait for image to load if not already loaded
-        if (img.tagName === 'IMG' && !img.complete) {
-            debug('waiting for image to load', img);
-            await new Promise((resolve) => {
-                const onLoad = () => {
-                    img.removeEventListener('load', onLoad);
-                    img.removeEventListener('error', onLoad);
-                    resolve();
-                };
-                img.addEventListener('load', onLoad);
-                img.addEventListener('error', onLoad);
-                // Fallback timeout
-                setTimeout(resolve, 5000);
-            });
-        }
-        
-        // This is the entire image size (should be at least 10k pixels)
-        if ( img.width*img.height < 100*100 ) {
-            info('image too small', img.width, img.height);
+        // Skip if currently being processed to avoid concurrent processing
+        if (processingImages.has(img)) {
+            debug('image currently being processed, skipping', img);
             return;
         }
         
-        // Get a blob from the image
-        const base64data = await base64FromAny(img);
-
-        const md5Hash = md5(base64data);
-
-        let error = undefined;
-
-        // Change image CSS while loading OCR and if error
-        var ocr;
-        img.classList.add('ocr-loading');
+        // Mark as being processed
+        processingImages.add(img);
+        
         try {
-            ocr = await getOcr(md5Hash, base64data, OPTIONS);
-        } catch (err) {
-            log_error(err);
-            if (err.code === "ERR_NETWORK") {
-                error = 'Network error';
-            } else if (err.code === "ERR_BAD_RESPONSE") {
-                let code = err.response.status;
-                let msg = err.response.data.error;
-                error = `Error [${code}]: ${msg}`;
-            } else {
-                error = 'Unknown error';
+            // Wait for image to load if not already loaded
+            if (img.tagName === 'IMG' && !img.complete) {
+                debug('waiting for image to load', img);
+                await new Promise((resolve) => {
+                    const onLoad = () => {
+                        img.removeEventListener('load', onLoad);
+                        img.removeEventListener('error', onLoad);
+                        resolve();
+                    };
+                    img.addEventListener('load', onLoad);
+                    img.addEventListener('error', onLoad);
+                    // Fallback timeout
+                    setTimeout(resolve, 5000);
+                });
             }
+            
+            // This is the entire image size (should be at least 10k pixels)
+            if ( img.width*img.height < 100*100 ) {
+                info('image too small', img.width, img.height);
+                // Don't mark as processed since it might resize later
+                return;
+            }
+            
+            let base64data;
+            try {
+                // Get a blob from the image
+                base64data = await base64FromAny(img);
+            } catch (err) {
+                log_error('Failed to convert image to base64:', err);
+                // Don't mark as processed, might work later
+                return;
+            }
+
+            const md5Hash = md5(base64data);
+
+            let error = undefined;
+
+            // Change image CSS while loading OCR and if error
+            var ocr;
+            img.classList.add('ocr-loading');
+            try {
+                ocr = await getOcr(md5Hash, base64data, OPTIONS);
+            } catch (err) {
+                log_error(err);
+                if (err.code === "ERR_NETWORK") {
+                    error = 'Network error';
+                } else if (err.code === "ERR_BAD_RESPONSE") {
+                    let code = err.response.status;
+                    let msg = err.response.data.error;
+                    error = `Error [${code}]: ${msg}`;
+                } else {
+                    error = 'Unknown error';
+                }
+            } finally {
+                img.classList.remove('ocr-loading');
+            }
+
+            let newImg, wrapper;
+            try {
+                [newImg, wrapper] = wrapImage(img);
+            } catch (err) {
+                log_error('Failed to wrap image:', err);
+                // Don't mark as processed, might work later
+                return;
+            }
+
+            if (error) {
+                applyError(newImg, wrapper, error);
+                newImg.classList.add('ocr-error');
+                // Don't mark as processed for errors - allow retry
+            } else {
+                applyOcr(newImg, wrapper, ocr);
+                // Only mark as successfully processed after successful OCR
+                processedImages.add(img);
+            }
+            newImg.addEventListener('load', onImageReload);
+            
         } finally {
-            img.classList.remove('ocr-loading');
+            // Always remove from processing set when done
+            processingImages.delete(img);
         }
-
-        const [newImg, wrapper] = wrapImage(img);
-
-        if (error) {
-            applyError(newImg, wrapper, error);
-            newImg.classList.add('ocr-error');
-        } else {
-            applyOcr(newImg, wrapper, ocr);
-        }
-        newImg.addEventListener('load', onImageReload);
     }
 
     /*
@@ -274,8 +306,9 @@ Function used to avoid multiple injection (cleaner than using an if?)
     */
     function onImageReload(e) {
         const img = e.target;
-        // Remove from processed set so it can be reprocessed
+        // Remove from both processed and processing sets so it can be reprocessed
         processedImages.delete(img);
+        processingImages.delete(img);
         destroyTextboxes(img);
         processImage(img);
     }
@@ -288,8 +321,9 @@ Function used to avoid multiple injection (cleaner than using an if?)
         const tag = node.tagName;
         if (['IMG', 'CANVAS'].includes(tag)) {
             debug('destroyTextboxes', node);
-            // Remove from processed set
+            // Remove from both processed and processing sets
             processedImages.delete(node);
+            processingImages.delete(node);
             
             const topop = [];
             images.forEach((ptr, idx) => {
