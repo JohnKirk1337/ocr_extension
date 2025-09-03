@@ -58,9 +58,11 @@ Function used to avoid multiple injection (cleaner than using an if?)
 
     // Helper function to process all images in a subtree
     function processImagesInSubtree(root) {
-        if (isImageNode(root) && !processedImages.has(root)) {
-            debug('new image found in subtree', root);
-            processImage(root);
+        if (isImageNode(root)) {
+            if (!processedImages.has(root)) {
+                debug('new image found in subtree', root);
+                processImage(root);
+            }
             return;
         }
         
@@ -411,6 +413,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
             })
             ptr.img.removeEventListener('load', onImageReload);
             processedImages.delete(ptr.img);
+            processingImages.delete(ptr.img);
             unwrapImage(ptr.img);
             images.splice(i, 1);
         }
