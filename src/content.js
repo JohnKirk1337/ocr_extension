@@ -60,7 +60,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
     function processImagesInSubtree(root) {
         if (isImageNode(root)) {
             if (!processedImages.has(root)) {
-                debug('new image found in subtree', root);
+                debug('direct image added', root);
                 processImage(root);
             }
             return;
@@ -70,7 +70,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
         const images = root.querySelectorAll ? root.querySelectorAll('img, canvas') : [];
         images.forEach((img) => {
             if (!processedImages.has(img)) {
-                debug('new image found via querySelectorAll', img);
+                debug('new image found via querySelectorAll in subtree', img);
                 processImage(img);
             }
         });
@@ -81,14 +81,8 @@ Function used to avoid multiple injection (cleaner than using an if?)
             if (mutation.type === 'childList') {
                 mutation.addedNodes.forEach((node) => {
                     if (node.nodeType === Node.ELEMENT_NODE) {
-                        // Check if the node itself is an image
-                        if (isImageNode(node)) {
-                            debug('direct image added', node);
-                            processImage(node);
-                        } else {
-                            // Check for images within the added node
-                            processImagesInSubtree(node);
-                        }
+                        // Check for images within the added node
+                        processImagesInSubtree(node);
                     }
                 });
                 
@@ -231,7 +225,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
                     img.addEventListener('load', onLoad);
                     img.addEventListener('error', onLoad);
                     // Fallback timeout
-                    setTimeout(resolve, 5000);
+                    setTimeout(resolve, 15000);
                 });
             }
             
@@ -381,7 +375,7 @@ Function used to avoid multiple injection (cleaner than using an if?)
             }
             
             document.querySelectorAll('img, canvas').forEach((img) => {
-                if (!processedImages.has(img)) {
+                if (!processedImages.has(img) && !processingImages.has(img)) {
                     debug('found unprocessed image during periodic check', img);
                     processImage(img);
                 }
